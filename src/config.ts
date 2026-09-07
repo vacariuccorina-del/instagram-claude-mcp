@@ -46,7 +46,6 @@ export type AppConfig = {
   graphApiBase: string;
   apiVersion: string;
   port: number;
-  mcpAuthToken: string | undefined;
   /** Instagram app secret — required only for short→long-lived token exchange */
   appSecret: string | undefined;
 };
@@ -86,11 +85,32 @@ export function loadConfig(): AppConfig {
     graphApiBase,
     apiVersion,
     port: Number(process.env.PORT) || 3000,
-    mcpAuthToken: process.env.MCP_AUTH_TOKEN?.trim()
-      ? sanitizeSecret(process.env.MCP_AUTH_TOKEN)
-      : undefined,
     appSecret: appSecret || undefined,
   };
+}
+
+export type AuthConfig = {
+  issuer: string;
+  resource: string;
+};
+
+/** Separate from Instagram config so health and OAuth discovery need no Meta token. */
+export function loadAuthConfig(): AuthConfig {
+  const issuer = new URL(process.env.WORKOS_AUTHKIT_ISSUER?.trim() || "");
+  const resource = new URL(process.env.MCP_RESOURCE_URL?.trim() || "");
+  const hasExtraParts = (url: URL) =>
+    Boolean(url.username || url.password || url.search || url.hash);
+  if (issuer.protocol !== "https:" || issuer.pathname !== "/" || hasExtraParts(issuer)) {
+    throw new Error("WORKOS_AUTHKIT_ISSUER must be an HTTPS AuthKit origin.");
+  }
+  const local = ["localhost", "127.0.0.1", "[::1]"].includes(resource.hostname);
+  if (
+    (resource.protocol !== "https:" && !(local && resource.protocol === "http:")) ||
+    resource.pathname !== "/mcp" || hasExtraParts(resource)
+  ) {
+    throw new Error("MCP_RESOURCE_URL must be the canonical HTTPS /mcp URL (HTTP allowed on loopback).");
+  }
+  return { issuer: issuer.origin, resource: resource.href };
 }
 
 export function getApiRoot(config: AppConfig): string {

@@ -8,7 +8,8 @@
     "build": "tsc",
     "start": "node dist/index.js",
     "dev": "tsx watch src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsc --target ES2022 --module Node16 --moduleResolution Node16 --strict --esModuleInterop --skipLibCheck --rootDir . --outDir dist/test-build tests/auth.test.ts && node --test dist/test-build/tests/auth.test.js"
   },
   "engines": {
     "node": ">=20"
@@ -26,6 +27,7 @@
     "@modelcontextprotocol/server": "^2.0.0",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "jose": "^6.2.12",
     "zod": "^4.4.3"
   },
   "devDependencies": {

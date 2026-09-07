@@ -36,14 +36,15 @@ Copy `.env.example` to `.env` and fill in values locally. Never commit `.env`.
 | `INSTAGRAM_API_VERSION` | No | Default `v22.0` |
 | `INSTAGRAM_APP_SECRET` | No | App secret — only for short→long-lived token exchange |
 | `PORT` | No | HTTP port (default `3000`) |
-| `MCP_AUTH_TOKEN` | No | If set, `/mcp` and `/exchange-instagram-token` require `Authorization: Bearer <token>` |
+| `WORKOS_AUTHKIT_ISSUER` | Yes | HTTPS AuthKit origin, matching the WorkOS Connect issuer |
+| `MCP_RESOURCE_URL` | Yes | Canonical HTTPS MCP endpoint URL including `/mcp`; must match the WorkOS Resource Indicator |
 
 ## Local development
 
 ```bash
 npm install
 cp .env.example .env
-# Edit .env with INSTAGRAM_ACCESS_TOKEN and INSTAGRAM_ACCOUNT_ID
+# Edit .env with Instagram credentials, WORKOS_AUTHKIT_ISSUER, and MCP_RESOURCE_URL
 
 npm run dev
 # or
@@ -53,9 +54,6 @@ npm run build && npm start
 Endpoints:
 
 - Health: `GET http://localhost:3000/health`
-- Auth debug (safe): `GET http://localhost:3000/debug-instagram-auth`
-- Profile tool debug: `GET http://localhost:3000/debug-instagram-profile`
-- Media list debug: `GET http://localhost:3000/debug-instagram-media`
 - MCP (Streamable HTTP): `http://localhost:3000/mcp`
 
 ### Instagram Login `id` vs `user_id`
@@ -70,15 +68,9 @@ This server resolves `user_id` from `/me` for Instagram Login and does **not** b
 ### Instagram Login tokens (short vs long-lived)
 
 - **App Dashboard → Generate token**: already **long-lived** (~60 days). Put it in `INSTAGRAM_ACCESS_TOKEN`.
-- **OAuth / Business Login** (authorization code → token): returns a **short-lived** token (~1 hour). Exchange it before production use:
+- **OAuth / Business Login** (authorization code → token): returns a **short-lived** token (~1 hour). Exchange it securely outside this server before production use, using Meta’s documented flow. Set the resulting long-lived token in your host’s secret environment variables. `/exchange-instagram-token` is disabled and never returns credentials.
 
-  1. Set `INSTAGRAM_ACCESS_TOKEN` to the short-lived token (temporarily).
-  2. Set `INSTAGRAM_APP_SECRET` to your Instagram app secret.
-  3. `POST /exchange-instagram-token` (send `Authorization: Bearer <MCP_AUTH_TOKEN>` if configured).
-  4. Copy `long_lived_access_token` from the JSON into `INSTAGRAM_ACCESS_TOKEN` on Vercel.
-  5. Redeploy / restart. Remove the short-lived value.
-
-Auth is sent as Meta’s documented `access_token` query parameter. Tokens are trimmed (whitespace, quotes, accidental `Bearer` / `access_token=` prefixes) before use. The full token is never logged or returned by `/debug-instagram-auth`.
+Auth is sent to Meta as its documented `access_token` query parameter. Instagram tokens are trimmed (whitespace, quotes, accidental `Bearer` / `access_token=` prefixes) before use. The diagnostic HTTP endpoints are disabled.
 
 Type-check without running:
 
@@ -104,7 +96,8 @@ This project is set up for Vercel’s Express runtime: the app is **exported as 
 2. Set Project Environment Variables (Production/Preview):
    - `INSTAGRAM_ACCESS_TOKEN`
    - `INSTAGRAM_ACCOUNT_ID`
-   - Optional: `MCP_AUTH_TOKEN`, `INSTAGRAM_GRAPH_API_BASE`, `INSTAGRAM_API_VERSION`
+   - `WORKOS_AUTHKIT_ISSUER`, `MCP_RESOURCE_URL`
+   - Optional: `INSTAGRAM_GRAPH_API_BASE`, `INSTAGRAM_API_VERSION`
 3. Deploy. Endpoints stay the same:
    - `https://your-app.vercel.app/health`
    - `https://your-app.vercel.app/mcp` (Streamable HTTP)
@@ -139,7 +132,7 @@ Add a custom connector with your HTTPS MCP URL, for example:
 https://your-service.example.com/mcp
 ```
 
-If you set `MCP_AUTH_TOKEN`, configure the matching bearer token in the connector settings when supported.
+Claude discovers AuthKit through OAuth protected resource metadata and prompts you to sign in.
 
 ### Claude Code
 
@@ -175,6 +168,7 @@ src/
   app.ts                # Express app factory (/health, /mcp) — default-exported for Vercel
   index.ts              # Entry: export app; listen only when not on Vercel
   config.ts             # Environment configuration
+  auth.ts               # WorkOS JWT verification and OAuth resource metadata
   mcp-server.ts         # MCP tool registration
   instagram/client.ts   # Official Graph API client (read-only)
 vercel.json             # Vercel Express + function limits
@@ -183,3 +177,31 @@ vercel.json             # Vercel Express + function limits
 ## License
 
 MIT
+
+## WorkOS AuthKit OAuth
+
+All requests to `/mcp` require a WorkOS Connect access token in the Authorization Bearer header. There is no static-token or anonymous fallback. Tokens must have an RS256 signature from the configured AuthKit JWKS, the correct issuer, an audience matching `MCP_RESOURCE_URL`, a nonempty subject, and an unexpired expiration claim. Future `nbf` claims are rejected. Signing keys are cached and refreshed by `jose`.
+
+1. In WorkOS, configure AuthKit for the users who should access this Instagram account.
+2. Under **Connect → Configuration**, enable **Client ID Metadata Document (CIMD)**. AuthKit handles CIMD, authorization, consent, and token issuance; this server does not host those endpoints. Enable DCR only if an older client requires it.
+3. Register the exact HTTPS MCP endpoint (for example, `https://your-service.example.com/mcp`) as a **Resource Indicator**. Set `MCP_RESOURCE_URL` to that same value. You may mark it as the default for clients that omit the resource parameter.
+4. Set `WORKOS_AUTHKIT_ISSUER` to the HTTPS AuthKit origin shown by `https://your-domain.authkit.app/.well-known/oauth-authorization-server`. Keys are read from that origin’s `/oauth2/jwks`. No WorkOS API key or client secret is needed for this resource server.
+5. After separately reviewing and deploying the changes, add the HTTPS `/mcp` URL as a Claude connector and complete AuthKit sign-in. The metadata resource, token audience, and configured WorkOS Resource Indicator must match exactly, including the path and absence of a trailing slash.
+
+This is a single-account server: every user admitted by your AuthKit configuration who obtains a token for this resource can read the configured Instagram account. Restrict AuthKit access to the intended users; the server does not map users to separate Instagram accounts.
+
+Public discovery is available at `/.well-known/oauth-protected-resource/mcp` and `/.well-known/oauth-protected-resource`. Both return `resource`, `authorization_servers`, and `bearer_methods_supported: ["header"]`. A missing or rejected bearer token receives HTTP 401 with a `WWW-Authenticate` header pointing to the path-specific metadata URL. Metadata uses configured URLs, never untrusted Host or forwarded headers.
+
+`/health` remains public and returns the existing read-only health response. Missing or malformed OAuth configuration produces HTTP 503 on MCP and metadata routes while health remains available in the running app. Local startup still requires the existing Instagram configuration. For local development, `MCP_RESOURCE_URL=http://localhost:3000/mcp` is allowed; the AuthKit issuer must still use HTTPS. Register the local resource separately if testing a real local OAuth flow.
+
+`/debug-instagram-auth`, `/debug-instagram-profile`, `/debug-instagram-media`, and `/exchange-instagram-token` return HTTP 404, even with a valid token. Their underlying Instagram client methods and all five read-only MCP tools are unchanged. The existing MCP POST/GET/DELETE transport handlers remain; these do not add Instagram write operations.
+
+Run `npm test`, `npm run typecheck`, and `npm run build` before deployment. Security tests use generated signing keys and mocked JWKS responses, without real WorkOS or Instagram credentials.
+
+References: [WorkOS MCP guide](https://workos.com/docs/authkit/mcp), [MCP authorization](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization).
+
+### Authorization-server discovery compatibility
+
+`GET /.well-known/oauth-authorization-server` is public and proxies the configured AuthKit issuer’s `/.well-known/oauth-authorization-server` JSON document. This supports clients that look for authorization-server discovery directly on the MCP server, following the [WorkOS compatibility guidance](https://workos.com/docs/authkit/mcp#compatibility). AuthKit remains the source of truth: its issuer, OAuth endpoint URLs, CIMD support, and extension fields are preserved.
+
+The proxy forwards no incoming credentials, cookies, query parameters, or host headers. It uses a five-second timeout, rejects redirects, verifies the returned issuer, and returns a generic 502 for upstream failures or invalid metadata. Missing OAuth configuration returns 503. Responses use `Cache-Control: no-store`. MCP token validation and all disabled administrative routes are unchanged.

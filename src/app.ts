@@ -3,9 +3,9 @@ import { NodeStreamableHTTPServerTransport } from "@modelcontextprotocol/node";
 import express, {
   type Request,
   type Response,
-  type NextFunction,
 } from "express";
 import { loadConfig, type AppConfig } from "./config.js";
+import { createWorkosAuth } from "./auth.js";
 import { InstagramClient } from "./instagram/client.js";
 import { createInstagramMcpServer } from "./mcp-server.js";
 
@@ -30,7 +30,9 @@ function getInstagramClient(): InstagramClient {
  * Express app used for local Node hosting and Vercel serverless.
  * Do not call app.listen() here — the entrypoint decides that.
  */
-export function createApp(): express.Express {
+export function createApp({ auth = createWorkosAuth() }: {
+  auth?: ReturnType<typeof createWorkosAuth>;
+} = {}): express.Express {
   // Bind 0.0.0.0 for remote deployment. Localhost-only DNS rebinding
   // protection is disabled when host is not loopback.
   // `express` is imported so Vercel can detect the Express framework entry.
@@ -44,110 +46,22 @@ export function createApp(): express.Express {
     });
   });
 
-  /**
-   * Temporary safe auth diagnostic.
-   * Never returns or logs the full access token.
-   */
-  app.get("/debug-instagram-auth", async (_req: Request, res: Response) => {
-    try {
-      const client = getInstagramClient();
-      const result = await client.debugAuth();
-      res.status(result.ok ? 200 : 502).json(result);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      // Config/load errors only — never include secrets.
-      res.status(500).json({
-        ok: false,
-        error: message,
-      });
-    }
-  });
+  // Both RFC 9728 path-specific discovery and the root compatibility endpoint.
+  app.get("/.well-known/oauth-protected-resource/mcp", auth.metadata);
+  app.get("/.well-known/oauth-protected-resource", auth.metadata);
+  app.get("/.well-known/oauth-authorization-server", auth.authorizationServerMetadata);
 
-  /** Safe test for get_instagram_profile (same client path as the MCP tool). */
-  app.get("/debug-instagram-profile", async (_req: Request, res: Response) => {
-    try {
-      const client = getInstagramClient();
-      const result = await client.debugProfile();
-      res.status(result.ok ? 200 : 502).json(result);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      res.status(500).json({ ok: false, error: message });
-    }
-  });
-
-  /** Safe test for list_instagram_media (uses /me.user_id as <IG_ID>). */
-  app.get("/debug-instagram-media", async (_req: Request, res: Response) => {
-    try {
-      const client = getInstagramClient();
-      const result = await client.debugListMedia(5);
-      res.status(result.ok ? 200 : 502).json(result);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      res.status(500).json({ ok: false, error: message });
-    }
-  });
-
-  /**
-   * Exchange a short-lived Instagram Login user token for a long-lived token.
-   * Requires INSTAGRAM_APP_SECRET. If MCP_AUTH_TOKEN is set, Bearer auth is required.
-   * Response includes the new token once so you can update Vercel env — treat as secret.
-   */
-  app.post(
+  // Administrative diagnostics and token exchange are intentionally unavailable.
+  app.use([
+    "/debug-instagram-auth",
+    "/debug-instagram-profile",
+    "/debug-instagram-media",
     "/exchange-instagram-token",
-    (req: Request, res: Response, next: NextFunction) => {
-      try {
-        const config = getConfig();
-        if (config.mcpAuthToken) {
-          const header = req.headers.authorization;
-          const token = header?.startsWith("Bearer ")
-            ? header.slice("Bearer ".length).trim()
-            : undefined;
-          if (token !== config.mcpAuthToken) {
-            res.status(401).json({ error: "Unauthorized" });
-            return;
-          }
-        }
-        next();
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        res.status(500).json({ error: message });
-      }
-    },
-    async (_req: Request, res: Response) => {
-      try {
-        const client = getInstagramClient();
-        const result = await client.exchangeForLongLivedToken();
-        res.status(result.ok ? 200 : 502).json(result);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        res.status(500).json({ ok: false, error: message });
-      }
-    },
-  );
-
-  app.use("/mcp", (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const config = getConfig();
-      if (!config.mcpAuthToken) {
-        next();
-        return;
-      }
-
-      const header = req.headers.authorization;
-      const token = header?.startsWith("Bearer ")
-        ? header.slice("Bearer ".length).trim()
-        : undefined;
-
-      if (token !== config.mcpAuthToken) {
-        res.status(401).json({ error: "Unauthorized" });
-        return;
-      }
-      next();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      res.status(500).json({ error: message });
-    }
+  ], (_req, res) => {
+    res.status(404).json({ error: "Not found" });
   });
+
+  app.use("/mcp", auth.requireAuth);
 
   async function handleMcp(req: Request, res: Response): Promise<void> {
     let client: InstagramClient;
