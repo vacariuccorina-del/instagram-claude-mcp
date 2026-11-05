@@ -3,41 +3,45 @@ import { z } from "zod";
 import type { InstagramClient } from "./instagram/client.js";
 import { InstagramApiError } from "./instagram/client.js";
 
+
 function jsonResult(data: unknown) {
   return {
     content: [
       {
         type: "text" as const,
-        text: JSON.stringify(data, null, 2),
+        text: JSON.stringify(
+          data,
+          (key, value) => {
+            if (key === "paging" && value && typeof value === "object") {
+              const { next, previous, ...safePaging } = value;
+              return safePaging;
+            }
+            return value;
+          },
+          2,
+        ),
       },
     ],
   };
 }
 
-function errorResult(error: unknown) {
-  if (error instanceof InstagramApiError) {
-    return {
-      content: [
-        {
-          type: "text" as const,
-          text: JSON.stringify(
-            {
-              error: error.message,
-              status: error.status,
-              details: error.body,
-            },
-            null,
-            2,
-          ),
-        },
-      ],
-      isError: true,
-    };
-  }
 
-  const message = error instanceof Error ? error.message : String(error);
+function errorResult(error: unknown) {
+  const status =
+    error instanceof InstagramApiError ? error.status : undefined;
+
+  const safeError = {
+    error: "Instagram API request failed",
+    ...(status !== undefined ? { status } : {}),
+  };
+
   return {
-    content: [{ type: "text" as const, text: message }],
+    content: [
+      {
+        type: "text" as const,
+        text: JSON.stringify(safeError, null, 2),
+      },
+    ],
     isError: true,
   };
 }
